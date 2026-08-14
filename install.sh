@@ -10,20 +10,20 @@ VERSION="v1.0.0"
 REPO_API="https://api.github.com/repos/SagerNet/sing-box/releases/latest"
 DL_BASE="https://github.com/SagerNet/sing-box/releases/download"
 SELF_URL="https://raw.githubusercontent.com/tianlong0/sing-box-installer/main/install.sh"
-WORK_DIR="/etc/vpn"
+WORK_DIR="/etc/sing-box"
 CONF_DIR="$WORK_DIR/conf"
 CERT_DIR="$WORK_DIR/cert"
 LOG_DIR="$WORK_DIR/logs"
 STATE_FILE="$WORK_DIR/state.env"
 BIN="$WORK_DIR/sing-box"
-SERVICE_NAME="vpn"
+SERVICE_NAME="sing-box"
 SERVICE_FILE="/etc/systemd/system/$SERVICE_NAME.service"
-CMD_LINK="/usr/local/bin/vpn"
+CMD_LINK="/usr/local/bin/sb"
 TEMP_DIR=$(mktemp -d)
 
 DEFAULT_PORT=8881
 DEFAULT_SNI="www.microsoft.com"
-DEFAULT_NODE="vpn"
+DEFAULT_NODE="sb"
 
 # 协议注册表（有序；端口=起始端口+序号）
 ALL_PROTOCOLS="reality hysteria2 tuic shadowsocks trojan"
@@ -141,7 +141,7 @@ gen_cert() {
   mkdir -p "$CERT_DIR"
   openssl ecparam -genkey -name prime256v1 -out "$CERT_DIR/private.key" 2>/dev/null
   openssl req -new -x509 -days 3650 -key "$CERT_DIR/private.key" -out "$CERT_DIR/cert.pem" \
-    -subj "/CN=vpn" -addext "subjectAltName=DNS:vpn.example.com" 2>/dev/null
+    -subj "/CN=sb" -addext "subjectAltName=DNS:sing-box.example.com" 2>/dev/null
   CERT_FP=$(openssl x509 -fingerprint -sha256 -noout -in "$CERT_DIR/cert.pem" | sed 's/.*=//; s/://g')
 }
 
@@ -311,14 +311,14 @@ EOF
 write_service() {
   cat > "$SERVICE_FILE" <<'UNIT'
 [Unit]
-Description=vpn (sing-box) proxy service
+Description=sb (sing-box) network service
 After=network.target nss-lookup.target
 
 [Service]
 Type=simple
 User=root
-WorkingDirectory=/etc/vpn
-ExecStart=/etc/vpn/sing-box run -C /etc/vpn/conf
+WorkingDirectory=/etc/sing-box
+ExecStart=/etc/sing-box/sing-box run -C /etc/sing-box/conf
 ExecReload=/bin/kill -HUP $MAINPID
 Restart=on-failure
 RestartSec=5s
@@ -447,15 +447,15 @@ print_links() {
 
 install_self() {
   if [ -f "$0" ]; then
-    cp "$0" "$WORK_DIR/vpn.sh"
+    cp "$0" "$WORK_DIR/sb.sh"
   elif printf '%s' "$SELF_URL" | grep -q 'githubusercontent'; then
-    curl -fsSL "$SELF_URL" -o "$WORK_DIR/vpn.sh" || warn "缓存 vpn 命令失败"
+    curl -fsSL "$SELF_URL" -o "$WORK_DIR/sb.sh" || warn "缓存 sb 命令失败"
   fi
-  if [ -f "$WORK_DIR/vpn.sh" ]; then
-    chmod +x "$WORK_DIR/vpn.sh"
-    ln -sf "$WORK_DIR/vpn.sh" "$CMD_LINK"
+  if [ -f "$WORK_DIR/sb.sh" ]; then
+    chmod +x "$WORK_DIR/sb.sh"
+    ln -sf "$WORK_DIR/sb.sh" "$CMD_LINK"
   else
-    warn "无法安装 vpn 快捷命令（不影响服务）"
+    warn "无法安装 sb 快捷命令（不影响服务）"
   fi
 }
 
@@ -521,7 +521,7 @@ do_install() {
 
   install_self
   print_links
-  info "完成。常用命令: vpn show / vpn status / vpn uninstall / vpn upgrade"
+  info "完成。常用命令: sb show / sb status / sb uninstall / sb upgrade"
 }
 
 do_show() { installed || die "尚未安装"; load_state; print_links; }
@@ -531,7 +531,7 @@ do_service() {
   installed || die "尚未安装"
   case "$1" in
     start|stop|restart) systemctl "$1" "$SERVICE_NAME" ;;
-    *) die "用法: vpn start|stop|restart" ;;
+    *) die "用法: sb start|stop|restart" ;;
   esac
 }
 
@@ -570,7 +570,7 @@ do_uninstall() {
 }
 
 menu() {
-  printf "\n============ vpn 管理菜单 ============\n"
+  printf "\n============ sb 管理菜单 ============\n"
   printf " 1) 查看节点/订阅链接\n"
   printf " 2) 服务状态\n"
   printf " 3) 重启服务\n"
@@ -593,7 +593,7 @@ menu() {
 
 usage() {
   cat <<EOF
-用法: vpn <命令>
+用法: sb <命令>
 
 命令:
   install           一键安装（全部 5 协议，自动探测 IP）
@@ -605,7 +605,7 @@ usage() {
   help              本帮助
 
 安装时可加环境变量:
-  PORT=8881 NAME=myvpn SNI=www.microsoft.com PROTO="reality hysteria2" vpn install
+  PORT=8881 NAME=mysb SNI=www.microsoft.com PROTO="reality hysteria2" sb install
 
 一行安装:
   bash <(curl -fsSL https://raw.githubusercontent.com/tianlong0/sing-box-installer/main/install.sh)
