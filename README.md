@@ -6,6 +6,10 @@
 - ✅ 无后台回传 / 无统计
 - ✅ 数据驱动：加协议只需改注册表，不再 5000 行 if
 - ✅ 状态持久化到 state.env（告别 sed/awk 抠 JSON）
+- ✅ 自动生成 clash.yaml / v2rayn 订阅
+- ✅ 支持 systemd + OpenRC（Alpine）
+- ✅ 卸载自动清理防火墙规则、iptables 持久化
+- ✅ 重装自动保留凭据（不换密钥）
 - ✅ 干净卸载
 
 ## 支持的协议
@@ -63,6 +67,7 @@ PORT=8881 NAME=mysb SNI=www.microsoft.com PROTO="reality hysteria2" sb install
 ├── cert/             # 自签证书
 ├── logs/
 ├── links.txt         # 订阅链接
+├── subscribe/        # clash.yaml / v2rayn 订阅
 ├── state.env         # 状态（端口/UUID/密钥）
 └── sb.sh            # 本脚本缓存
 ```
