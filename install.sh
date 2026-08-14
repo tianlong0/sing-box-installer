@@ -102,11 +102,11 @@ svc() {
 }
 
 fetch_release_info() {
-  curl -fsSL --retry 3 --connect-timeout 10 "$REPO_API" || die "无法访问 GitHub API（网络问题？）"
+  curl -fsSL --retry 3 --connect-timeout 10 "$REPO_API"
 }
 
 parse_version() {
-  printf '%s' "$1" | sed -n 's/.*"tag_name"[[:space:]]*:[[:space:]]*"\([^"]*\)".*/\1/p' | head -1 | sed 's/^v//'
+  printf '%s' "$1" | sed -n 's/.*"tag_name"[[:space:]]*:[[:space:]]*"\([^"]*\)".*/\1/p' | sed 's/^v//'
 }
 
 asset_digest() {
@@ -123,14 +123,14 @@ asset_digest() {
 download_singbox() {
   local json ver asset url digest actual
   info "查询 sing-box 最新版本 ..."
-  json=$(fetch_release_info)
+  json=$(fetch_release_info) || { error "无法访问 GitHub API（网络问题？）"; return 1; }
   ver=$(parse_version "$json")
-  [ -n "$ver" ] || die "解析版本号失败"
+  [ -n "$ver" ] || { error "解析版本号失败"; return 1; }
   asset="sing-box-$ver-linux-$ARCH.tar.gz"
   url="$DL_BASE/v$ver/$asset"
 
   info "下载 $asset ..."
-  curl -fL --retry 3 --connect-timeout 15 -o "$TEMP_DIR/sing-box.tar.gz" "$url" || die "下载失败: $url"
+  curl -fL --retry 3 --connect-timeout 15 -o "$TEMP_DIR/sing-box.tar.gz" "$url" || { error "下载失败: $url"; return 1; }
 
   digest=$(asset_digest "$json" "$asset")
   if [ -n "$digest" ]; then
@@ -138,16 +138,17 @@ download_singbox() {
     if [ "$actual" = "$digest" ]; then
       info "SHA256 校验通过 ✓ ($digest)"
     else
-      die "SHA256 校验失败！期望 $digest 实际 $actual"
+      error "SHA256 校验失败！期望 $digest 实际 $actual"
+      return 1
     fi
   else
     warn "未取到官方校验和，跳过校验"
   fi
 
-  tar -xzf "$TEMP_DIR/sing-box.tar.gz" -C "$TEMP_DIR" "sing-box-$ver-linux-$ARCH/sing-box" || die "解压失败"
+  tar -xzf "$TEMP_DIR/sing-box.tar.gz" -C "$TEMP_DIR" "sing-box-$ver-linux-$ARCH/sing-box" || { error "解压失败"; return 1; }
   mv "$TEMP_DIR/sing-box-$ver-linux-$ARCH/sing-box" "$BIN"
   chmod +x "$BIN"
-  "$BIN" version >/dev/null 2>&1 || die "sing-box 二进制不可执行"
+  "$BIN" version >/dev/null 2>&1 || { error "sing-box 二进制不可执行"; return 1; }
   SING_BOX_VER="$ver"
   info "sing-box v$ver 就绪"
 }
@@ -250,7 +251,7 @@ gen_inbound() {
           "enabled": true,
           "handshake": { "server": "$SNI", "server_port": 443 },
           "private_key": "$REALITY_PRIVATE",
-          "short_id": [ "" ]
+          "short_id": [ "$SHORT_ID" ]
         }
       }
     }
@@ -461,6 +462,7 @@ write_state() {
     echo "SNI=$SNI"
     echo "REALITY_PRIVATE=$REALITY_PRIVATE"
     echo "REALITY_PUBLIC=$REALITY_PUBLIC"
+    echo "SHORT_ID=$SHORT_ID"
     echo "CERT_FP=$CERT_FP"
     echo "SS_PASSWORD=$SS_PASSWORD"
     echo "SERVER_IP=$SERVER_IP"
@@ -494,7 +496,7 @@ gen_links() {
     case "$p" in
       reality)
         LINKS="$LINKS
-vless://$UUID@$ip:$port?encryption=none&flow=xtls-rprx-vision&security=reality&sni=$SNI&fp=chrome&pbk=$REALITY_PUBLIC&type=tcp&headerType=none#$NODE_NAME-reality"
+vless://$UUID@$ip:$port?encryption=none&flow=xtls-rprx-vision&security=reality&sni=$SNI&fp=chrome&pbk=$REALITY_PUBLIC&sid=$SHORT_ID&type=tcp&headerType=none#$NODE_NAME-reality"
         ;;
       hysteria2)
         LINKS="$LINKS
@@ -521,6 +523,7 @@ trojan://$UUID@$ip:$port?security=tls&type=tcp&sni=$SNI&allowInsecure=1#$NODE_NA
 gen_clash_yaml() {
   local ip p port
   ip=$(ip_uri)
+  printf '%s' "$ip" | grep -q ':' && ip="\"$ip\""
   mkdir -p "$WORK_DIR/subscribe"
   {
     echo "mixed-port: 7890"
@@ -546,7 +549,7 @@ gen_clash_yaml() {
     servername: $SNI
     reality-opts:
       public-key: $REALITY_PUBLIC
-      short-id: ""
+      short-id: "$SHORT_ID"
     client-fingerprint: chrome
 EOF
           ;;
@@ -685,7 +688,7 @@ do_install() {
 
   mkdir -p "$WORK_DIR" "$CONF_DIR" "$CERT_DIR" "$LOG_DIR"
 
-  download_singbox
+  download_singbox || die "下载 sing-box 失败"
   info "生成密钥与证书 ..."
   [ -z "$UUID" ] && UUID=$(gen_uuid)
   [ -z "$SS_PASSWORD" ] && SS_PASSWORD=$(openssl rand -base64 16)
@@ -693,6 +696,7 @@ do_install() {
   [ -z "$SERVER_IP" ] && detect_server_ip
   if printf '%s' "$PROTOCOLS_TO_INSTALL" | grep -qw reality; then
     [ -z "$REALITY_PRIVATE" ] && gen_reality_keypair
+    [ -z "$SHORT_ID" ] && SHORT_ID=$(openssl rand -hex 4)
   fi
 
   info "生成配置 ..."
@@ -755,7 +759,8 @@ do_upgrade() {
     fi
   else
     mv "$BIN.bak" "$BIN" 2>/dev/null || true
-    die "下载失败，已回滚"
+    svc start || true
+    die "下载失败，已回滚旧版本"
   fi
 }
 
