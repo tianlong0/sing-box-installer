@@ -166,8 +166,21 @@ gen_reality_keypair() {
 gen_cert() {
   mkdir -p "$CERT_DIR"
   openssl ecparam -genkey -name prime256v1 -out "$CERT_DIR/private.key" 2>/dev/null
+  cat > "$CERT_DIR/cert.conf" <<EOF
+[req]
+distinguished_name = dn
+x509_extensions = v3_req
+prompt = no
+
+[dn]
+CN = sb
+
+[v3_req]
+subjectAltName = DNS:sing-box.example.com
+EOF
   openssl req -new -x509 -days 3650 -key "$CERT_DIR/private.key" -out "$CERT_DIR/cert.pem" \
-    -subj "/CN=sb" -addext "subjectAltName=DNS:sing-box.example.com" 2>/dev/null
+    -config "$CERT_DIR/cert.conf" -extensions v3_req 2>/dev/null
+  rm -f "$CERT_DIR/cert.conf"
   CERT_FP=$(openssl x509 -fingerprint -sha256 -noout -in "$CERT_DIR/cert.pem" | sed 's/.*=//; s/://g')
 }
 
@@ -699,7 +712,7 @@ do_install() {
   gen_v2rayn_sub
 
   svc enable
-  svc restart
+  svc restart || true
   sleep 2
   if svc is-active; then
     info "服务已启动 ✓"
@@ -729,7 +742,7 @@ do_upgrade() {
   svc stop
   cp "$BIN" "$BIN.bak" 2>/dev/null || true
   if download_singbox; then
-    svc start
+    svc start || true
     sleep 2
     if svc is-active; then
       rm -f "$BIN.bak"
@@ -802,6 +815,7 @@ EOF
 
 main() {
   check_root
+  detect_init
   cmd=""
   [ $# -gt 0 ] && cmd="$1"
   case "$cmd" in
