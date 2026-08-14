@@ -15,6 +15,7 @@ CONF_DIR="$WORK_DIR/conf"
 CERT_DIR="$WORK_DIR/cert"
 LOG_DIR="$WORK_DIR/logs"
 STATE_FILE="$WORK_DIR/state.env"
+FIREWALL_STATE="$WORK_DIR/firewall.list"
 BIN="$WORK_DIR/sing-box"
 SERVICE_NAME="sing-box"
 SERVICE_FILE="/etc/systemd/system/$SERVICE_NAME.service"
@@ -340,16 +341,48 @@ open_port() {
     iptables -C INPUT -p "$proto" --dport "$port" -j ACCEPT >/dev/null 2>&1 || \
       iptables -I INPUT -p "$proto" --dport "$port" -j ACCEPT
   fi
+  echo "$proto $port" >> "$FIREWALL_STATE"
+}
+
+close_port() {
+  local proto="$1" port="$2"
+  if command -v ufw >/dev/null 2>&1; then
+    ufw delete allow "$port/$proto" >/dev/null 2>&1 || true
+  elif command -v firewall-cmd >/dev/null 2>&1; then
+    firewall-cmd --permanent --remove-port="$port/$proto" >/dev/null 2>&1 || true
+  elif command -v iptables >/dev/null 2>&1; then
+    iptables -D INPUT -p "$proto" --dport "$port" -j ACCEPT >/dev/null 2>&1 || true
+  fi
 }
 
 reload_firewall() {
   if command -v ufw >/dev/null 2>&1; then ufw reload >/dev/null 2>&1 || true
   elif command -v firewall-cmd >/dev/null 2>&1; then firewall-cmd --reload >/dev/null 2>&1 || true
+  elif command -v iptables-save >/dev/null 2>&1; then
+    # iptables 规则持久化，避免重启丢失
+    if command -v netfilter-persistent >/dev/null 2>&1; then
+      netfilter-persistent save >/dev/null 2>&1 || true
+    elif [ -d /etc/iptables ]; then
+      iptables-save > /etc/iptables/rules.v4 2>/dev/null || true
+      command -v ip6tables-save >/dev/null 2>&1 && ip6tables-save > /etc/iptables/rules.v6 2>/dev/null || true
+    fi
   fi
+}
+
+purge_firewall() {
+  if [ -s "$FIREWALL_STATE" ]; then
+    local proto port
+    while read -r proto port; do
+      close_port "$proto" "$port"
+    done < "$FIREWALL_STATE"
+    rm -f "$FIREWALL_STATE"
+  fi
+  reload_firewall
 }
 
 setup_firewall() {
   local p port
+  : > "$FIREWALL_STATE"
   for p in $PROTOCOLS_TO_INSTALL; do
     port=$(proto_port "$p")
     case "$p" in
@@ -465,14 +498,17 @@ do_install() {
   need_cmd openssl openssl
   need_cmd tar tar
 
-  # 安装参数（可用环境变量覆盖：PORT / NAME / SNI / PROTO）
-  [ -z "$PORT" ] && PORT="$DEFAULT_PORT"
+  # 安装参数优先级：环境变量(PORT/NAME/SNI/PROTO) > 已安装 state > 默认值
+  local use_port="$PORT" use_name="$NAME" use_sni="$SNI" use_proto="$PROTO"
+  if installed; then load_state; fi
+  [ -n "$use_sni" ] && SNI="$use_sni"
+  [ -n "$use_name" ] && NODE_NAME="$use_name"
+  [ -n "$use_port" ] && START_PORT="$use_port"
+  [ -n "$use_proto" ] && PROTOCOLS_TO_INSTALL="$use_proto"
   [ -z "$SNI" ] && SNI="$DEFAULT_SNI"
-  [ -z "$NAME" ] && NAME="$DEFAULT_NODE"
-  [ -z "$PROTO" ] && PROTO="$ALL_PROTOCOLS"
-  START_PORT="$PORT"
-  NODE_NAME="$NAME"
-  PROTOCOLS_TO_INSTALL="$PROTO"
+  [ -z "$NODE_NAME" ] && NODE_NAME="$DEFAULT_NODE"
+  [ -z "$START_PORT" ] && START_PORT="$DEFAULT_PORT"
+  [ -z "$PROTOCOLS_TO_INSTALL" ] && PROTOCOLS_TO_INSTALL="$ALL_PROTOCOLS"
 
   # 校验协议名
   local tmp=""
@@ -490,11 +526,13 @@ do_install() {
 
   download_singbox
   info "生成密钥与证书 ..."
-  UUID=$(gen_uuid)
-  SS_PASSWORD=$(openssl rand -base64 16)
-  gen_cert
-  detect_server_ip
-  if printf '%s' "$PROTOCOLS_TO_INSTALL" | grep -qw reality; then gen_reality_keypair; fi
+  [ -z "$UUID" ] && UUID=$(gen_uuid)
+  [ -z "$SS_PASSWORD" ] && SS_PASSWORD=$(openssl rand -base64 16)
+  [ -s "$CERT_DIR/cert.pem" ] || gen_cert
+  [ -z "$SERVER_IP" ] && detect_server_ip
+  if printf '%s' "$PROTOCOLS_TO_INSTALL" | grep -qw reality; then
+    [ -z "$REALITY_PRIVATE" ] && gen_reality_keypair
+  fi
 
   info "生成配置 ..."
   gen_base_config
@@ -562,6 +600,7 @@ do_uninstall() {
   installed || die "尚未安装"
   systemctl disable "$SERVICE_NAME" >/dev/null 2>&1 || true
   systemctl stop "$SERVICE_NAME" >/dev/null 2>&1 || true
+  purge_firewall
   rm -f "$SERVICE_FILE" "$CMD_LINK"
   rm -rf "$WORK_DIR"
   systemctl daemon-reload
