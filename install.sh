@@ -76,6 +76,31 @@ detect_init() {
   if [ -f /etc/alpine-release ]; then INIT="openrc"; else INIT="systemd"; fi
 }
 
+# 服务管理抽象：systemd / OpenRC 双轨
+svc() {
+  if [ "$INIT" = "openrc" ]; then
+    case "$1" in
+      enable) rc-update add "$SERVICE_NAME" default >/dev/null 2>&1 || true ;;
+      disable) rc-update del "$SERVICE_NAME" default >/dev/null 2>&1 || true ;;
+      start) rc-service "$SERVICE_NAME" start >/dev/null 2>&1 || true ;;
+      stop) rc-service "$SERVICE_NAME" stop >/dev/null 2>&1 || true ;;
+      restart) rc-service "$SERVICE_NAME" restart >/dev/null 2>&1 || true ;;
+      status) rc-service "$SERVICE_NAME" status ;;
+      is-active) rc-service "$SERVICE_NAME" status >/dev/null 2>&1 ;;
+    esac
+  else
+    case "$1" in
+      enable) systemctl enable "$SERVICE_NAME" >/dev/null 2>&1 || true ;;
+      disable) systemctl disable "$SERVICE_NAME" >/dev/null 2>&1 || true ;;
+      start) systemctl start "$SERVICE_NAME" ;;
+      stop) systemctl stop "$SERVICE_NAME" >/dev/null 2>&1 || true ;;
+      restart) systemctl restart "$SERVICE_NAME" ;;
+      status) systemctl status "$SERVICE_NAME" --no-pager ;;
+      is-active) systemctl is-active --quiet "$SERVICE_NAME" ;;
+    esac
+  fi
+}
+
 fetch_release_info() {
   curl -fsSL --retry 3 --connect-timeout 10 "$REPO_API" || die "无法访问 GitHub API（网络问题？）"
 }
@@ -310,7 +335,26 @@ EOF
 }
 
 write_service() {
-  cat > "$SERVICE_FILE" <<'UNIT'
+  if [ "$INIT" = "openrc" ]; then
+    cat > "/etc/init.d/$SERVICE_NAME" <<'UNIT'
+#!/sbin/openrc-run
+name="sing-box"
+description="sing-box network service"
+command="/etc/sing-box/sing-box"
+command_args="run -C /etc/sing-box/conf"
+command_background="yes"
+pidfile="/var/run/sing-box.pid"
+output_log="/etc/sing-box/logs/sing-box.log"
+error_log="/etc/sing-box/logs/sing-box.log"
+
+depend() {
+    need net
+    after net
+}
+UNIT
+    chmod +x "/etc/init.d/$SERVICE_NAME"
+  else
+    cat > "$SERVICE_FILE" <<'UNIT'
 [Unit]
 Description=sb (sing-box) network service
 After=network.target nss-lookup.target
@@ -328,7 +372,8 @@ LimitNOFILE=infinity
 [Install]
 WantedBy=multi-user.target
 UNIT
-  systemctl daemon-reload
+    systemctl daemon-reload
+  fi
 }
 
 open_port() {
@@ -460,6 +505,108 @@ trojan://$UUID@$ip:$port?security=tls&type=tcp&sni=$SNI&allowInsecure=1#$NODE_NA
   printf '%s\n' "$LINKS" | sed '/^$/d' > "$WORK_DIR/links.txt"
 }
 
+gen_clash_yaml() {
+  local ip p port
+  ip=$(ip_uri)
+  mkdir -p "$WORK_DIR/subscribe"
+  {
+    echo "mixed-port: 7890"
+    echo "allow-lan: false"
+    echo "mode: rule"
+    echo "log-level: info"
+    echo ""
+    echo "proxies:"
+    for p in $PROTOCOLS_TO_INSTALL; do
+      port=$(proto_port "$p")
+      case "$p" in
+        reality)
+          cat <<EOF
+  - name: "$NODE_NAME-reality"
+    type: vless
+    server: $ip
+    port: $port
+    uuid: $UUID
+    network: tcp
+    tls: true
+    udp: true
+    flow: xtls-rprx-vision
+    servername: $SNI
+    reality-opts:
+      public-key: $REALITY_PUBLIC
+      short-id: ""
+    client-fingerprint: chrome
+EOF
+          ;;
+        hysteria2)
+          cat <<EOF
+  - name: "$NODE_NAME-hysteria2"
+    type: hysteria2
+    server: $ip
+    port: $port
+    password: $UUID
+    sni: $SNI
+    skip-cert-verify: true
+EOF
+          ;;
+        tuic)
+          cat <<EOF
+  - name: "$NODE_NAME-tuic"
+    type: tuic
+    server: $ip
+    port: $port
+    uuid: $UUID
+    password: $UUID
+    alpn: [h3]
+    congestion-controller: bbr
+    udp-relay-mode: native
+    sni: $SNI
+    skip-cert-verify: true
+EOF
+          ;;
+        shadowsocks)
+          cat <<EOF
+  - name: "$NODE_NAME-shadowsocks"
+    type: ss
+    server: $ip
+    port: $port
+    cipher: 2022-blake3-aes-128-gcm
+    password: $SS_PASSWORD
+    udp: true
+EOF
+          ;;
+        trojan)
+          cat <<EOF
+  - name: "$NODE_NAME-trojan"
+    type: trojan
+    server: $ip
+    port: $port
+    password: $UUID
+    sni: $SNI
+    skip-cert-verify: true
+    udp: true
+EOF
+          ;;
+      esac
+    done
+    echo ""
+    echo "proxy-groups:"
+    echo "  - name: \"PROXY\""
+    echo "    type: select"
+    echo "    proxies:"
+    for p in $PROTOCOLS_TO_INSTALL; do
+      echo "      - $NODE_NAME-$p"
+    done
+    echo ""
+    echo "rules:"
+    echo "  - MATCH,PROXY"
+  } > "$WORK_DIR/subscribe/clash.yaml"
+}
+
+gen_v2rayn_sub() {
+  mkdir -p "$WORK_DIR/subscribe"
+  base64 < "$WORK_DIR/links.txt" | tr -d '\n' > "$WORK_DIR/subscribe/v2rayn.txt"
+}
+
 print_links() {
   local p port
   printf "\n============ 节点信息 ============\n"
@@ -476,6 +623,8 @@ print_links() {
   cat "$WORK_DIR/links.txt"
   printf "\n------------------------\n"
   printf "链接已保存到 $WORK_DIR/links.txt\n"
+  printf "Clash 订阅: $WORK_DIR/subscribe/clash.yaml\n"
+  printf "v2rayn 订阅(复制整串): $WORK_DIR/subscribe/v2rayn.txt\n"
 }
 
 install_self() {
@@ -520,7 +669,6 @@ do_install() {
 
   detect_arch
   detect_init
-  [ "$INIT" = "systemd" ] || die "当前版本仅支持 systemd（Alpine 后续支持）"
 
   mkdir -p "$WORK_DIR" "$CONF_DIR" "$CERT_DIR" "$LOG_DIR"
 
@@ -547,14 +695,16 @@ do_install() {
   setup_firewall
   write_state
   gen_links
+  gen_clash_yaml
+  gen_v2rayn_sub
 
-  systemctl enable "$SERVICE_NAME" >/dev/null 2>&1 || true
-  systemctl restart "$SERVICE_NAME"
+  svc enable
+  svc restart
   sleep 2
-  if systemctl is-active --quiet "$SERVICE_NAME"; then
+  if svc is-active; then
     info "服务已启动 ✓"
   else
-    warn "服务启动失败，请查看: journalctl -u $SERVICE_NAME -e"
+    warn "服务启动失败，请查看日志"
   fi
 
   install_self
@@ -563,12 +713,12 @@ do_install() {
 }
 
 do_show() { installed || die "尚未安装"; load_state; print_links; }
-do_status() { installed || die "尚未安装"; systemctl status "$SERVICE_NAME" --no-pager || true; }
+do_status() { installed || die "尚未安装"; svc status || true; }
 
 do_service() {
   installed || die "尚未安装"
   case "$1" in
-    start|stop|restart) systemctl "$1" "$SERVICE_NAME" ;;
+    start|stop|restart) svc "$1" ;;
     *) die "用法: sb start|stop|restart" ;;
   esac
 }
@@ -576,18 +726,18 @@ do_service() {
 do_upgrade() {
   installed || die "尚未安装"
   detect_arch
-  systemctl stop "$SERVICE_NAME" 2>/dev/null || true
+  svc stop
   cp "$BIN" "$BIN.bak" 2>/dev/null || true
   if download_singbox; then
-    systemctl start "$SERVICE_NAME"
+    svc start
     sleep 2
-    if systemctl is-active --quiet "$SERVICE_NAME"; then
+    if svc is-active; then
       rm -f "$BIN.bak"
       info "升级成功: v$SING_BOX_VER"
       sed -i "s/^SING_BOX_VER=.*/SING_BOX_VER=$SING_BOX_VER/" "$STATE_FILE"
     else
       mv "$BIN.bak" "$BIN"
-      systemctl start "$SERVICE_NAME"
+      svc start
       warn "新版本启动失败，已回滚旧版本"
     fi
   else
@@ -598,12 +748,12 @@ do_upgrade() {
 
 do_uninstall() {
   installed || die "尚未安装"
-  systemctl disable "$SERVICE_NAME" >/dev/null 2>&1 || true
-  systemctl stop "$SERVICE_NAME" >/dev/null 2>&1 || true
+  svc disable
+  svc stop
   purge_firewall
-  rm -f "$SERVICE_FILE" "$CMD_LINK"
+  rm -f "$SERVICE_FILE" "/etc/init.d/$SERVICE_NAME" "$CMD_LINK"
   rm -rf "$WORK_DIR"
-  systemctl daemon-reload
+  command -v systemctl >/dev/null 2>&1 && systemctl daemon-reload || true
   info "已完全卸载"
 }
 
