@@ -546,7 +546,6 @@ do_upgrade() {
     if systemctl is-active --quiet "$SERVICE_NAME"; then
       rm -f "$BIN.bak"
       info "升级成功: v$SING_BOX_VER"
-      load_state
       sed -i "s/^SING_BOX_VER=.*/SING_BOX_VER=$SING_BOX_VER/" "$STATE_FILE"
     else
       mv "$BIN.bak" "$BIN"
